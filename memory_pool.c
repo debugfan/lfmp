@@ -1,8 +1,8 @@
 // implement for lockfree memory pool
 // entry refer count:
-//  0: freed.
+//  0: reserve for being freed.
 //  1: first malloc or in list or pop from list uniquely
-//  2: pop from list, and node is visitied possibly by others
+//  2: pop from list, and node is tried to access possibly by others
 
 #include "memory_pool.h"
 #include <stdio.h>
@@ -46,44 +46,31 @@ mp_entry_t *mp_slist_pop(mp_slist_t *li)
         if (first == li->next)
         {
             // avoid first entry is original first, but first->next isn't
-            if (ENTRY_INITIAL_REFER_COUNT == InterlockedIncrement(&first->ref_cnt)) 
+            InterlockedIncrement(&first->ref_cnt);
+            if (first == li->next)
             {
-                assert(first != li->next);
-                InterlockedIncrement(&first->ref_cnt);
-                done = 1;
-            }
-            else
-            {
-                if (first == li->next)
+                next = first->next;
+                if (first == InterlockedCompareExchangePointer(&li->next,
+                    next,
+                    first))
                 {
-                    next = first->next;
-                    if (first == InterlockedCompareExchangePointer(&li->next,
-                        next,
-                        first))
-                    {
-                        assert(next == first->next);
-                        done = 1;
-                    }
+                    assert(next == first->next);
+                    done = 1;
                 }
             }
 
             if (done == 0)
             {
-                if (0 == InterlockedDecrement(&first->ref_cnt))
+                if (ENTRY_INITIAL_REFER_COUNT == InterlockedDecrement(&first->ref_cnt))
                 {
-                    if (ENTRY_INITIAL_REFER_COUNT == InterlockedIncrement(&first->ref_cnt))
+                    if (0 == InterlockedCompareExchange(&first->owned, 1, 0))
                     {
                         InterlockedIncrement(&first->ref_cnt);
                         done = 1;
                     }
-                    else
-                    {
-                        InterlockedDecrement(&first->ref_cnt);
-                    }
                 }
             }
         }
-
         li_rc = InterlockedDecrement(&li->ref_cnt);
         if (done != 0)
         {
@@ -169,6 +156,7 @@ void *mp_bucket_malloc(mp_bucket_t *bucket)
         }
         ((mp_entry_t *)entry)->size = block_size;
         ((mp_entry_t *)entry)->ref_cnt = ENTRY_INITIAL_REFER_COUNT;
+        ((mp_entry_t *)entry)->owned = 1;
 
         InterlockedIncrement(&bucket->entries);
     }
@@ -207,16 +195,13 @@ void mp_bucket_free(mp_bucket_t *bucket, mp_entry_t *entry)
         }
         else
         {
+            InterlockedExchange(&entry->owned, 0);
             InterlockedIncrement(&bucket->usable.ref_cnt);
-            if (0 == InterlockedAdd(&entry->ref_cnt, -2))
+            if (ENTRY_INITIAL_REFER_COUNT == InterlockedDecrement(&entry->ref_cnt))
             {
-                if (ENTRY_INITIAL_REFER_COUNT == InterlockedIncrement(&entry->ref_cnt))
+                if (InterlockedCompareExchange(&entry->owned, 1, 0) == 0)
                 {
                     mp_slist_push(&bucket->usable, entry);
-                }
-                else
-                {
-                    InterlockedDecrement(&entry->ref_cnt);
                 }
             }
             InterlockedDecrement(&bucket->usable.ref_cnt);
@@ -248,5 +233,15 @@ void mp_clear()
     for (int i = 0; i < MEMORY_POOL_BUCKETS_NUMBER; i++)
     {
         mp_bucket_clear(&g_memory_pool.buckets[i]);
+    }
+}
+
+void mp_print()
+{
+    for (int i = 0; i < MEMORY_POOL_BUCKETS_NUMBER; i++)
+    {
+        printf("memory pool bucket[%d]: entries: %d\n", 
+            i,
+            g_memory_pool.buckets[i].entries);
     }
 }

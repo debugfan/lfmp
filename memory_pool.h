@@ -11,6 +11,7 @@ typedef struct _mp_entry
     struct _mp_entry *next;
     unsigned int size;
     volatile int ref_cnt;
+    volatile int owned;
 } mp_entry_t;
 
 typedef struct
@@ -40,6 +41,7 @@ void mp_init(int max_usable, int flags);
 void *mp_malloc(unsigned int size);
 void mp_free(void *p);
 void mp_clear();
+void mp_print();
 
 #ifdef __cplusplus
 }

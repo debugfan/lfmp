@@ -54,13 +54,14 @@ DWORD WINAPI test_original_free_proc(LPVOID lpParam)
 {
     LARGE_INTEGER start, end;
     LONGLONG sub;
+    void *v;
     int id;
     int n = 1;
     id = (int)lpParam;
     QueryPerformanceCounter(&start);
     for (int i = 0; i < ALLOC_TIMES; i++)
     {
-        void *v = InterlockedExchangePointer(&ori_shared, NULL);
+        v = InterlockedExchangePointer(&ori_shared, NULL);
         if (v != NULL)
         {
             free(v);
@@ -70,6 +71,11 @@ DWORD WINAPI test_original_free_proc(LPVOID lpParam)
             InterlockedExchangePointer(&ori_shared, malloc(n));
             n = get_next_size(n);
         }
+    }
+    v = InterlockedExchangePointer(&ori_shared, NULL);
+    if (v != NULL)
+    {
+        free(v);
     }
     QueryPerformanceCounter(&end);
     sub = end.QuadPart - start.QuadPart;
@@ -106,11 +112,12 @@ DWORD WINAPI test_memory_pool_free_proc(LPVOID lpParam)
     LONGLONG sub;
     int id;
     int n = 1;
+    void *v;
     id = (int)lpParam;
     QueryPerformanceCounter(&start);
     for (int i = 0; i < ALLOC_TIMES; i++)
     {
-        void *v = InterlockedExchangePointer(&mp_shared, NULL);
+        v = InterlockedExchangePointer(&mp_shared, NULL);
         if (v != NULL)
         {
             mp_free(v);
@@ -120,6 +127,11 @@ DWORD WINAPI test_memory_pool_free_proc(LPVOID lpParam)
             InterlockedExchangePointer(&mp_shared, mp_malloc(n));
             n = get_next_size(n);
         }
+    }
+    v = InterlockedExchangePointer(&mp_shared, NULL);
+    if (v != NULL)
+    {
+        mp_free(v);
     }
     QueryPerformanceCounter(&end);
     sub = end.QuadPart - start.QuadPart;
@@ -174,26 +186,22 @@ void test_performance(int num_threads,
 
 int _tmain(int argc, _TCHAR* argv[])
 {
+    printf("big memory test.\n");
     mp_init(65536*1024*8, 0);
-
     test_performance(4, test_memory_pool_proc);
     test_performance(4, test_original_proc);
-
     test_performance(4, test_memory_pool_free_proc);
     test_performance(4, test_original_free_proc);
-
     mp_clear();
+    mp_print();
 
     printf("small memory test.\n");
-
     mp_init(65536 * 8, 0);
-
     test_performance(4, test_memory_pool_proc);
     test_performance(4, test_original_proc);
-
     test_performance(4, test_memory_pool_free_proc);
     test_performance(4, test_original_free_proc);
-
     mp_clear();
+    mp_print();
 	return 0;
 }
