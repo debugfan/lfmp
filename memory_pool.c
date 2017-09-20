@@ -50,7 +50,7 @@ mp_entry_t *mp_slist_pop(mp_slist_t *li)
         {
             break;
         }
-        InterlockedIncrement(&li->ref_cnt); // avoid the following first entry is removed
+        InterlockedIncrement(&li->ref_cnt); // avoid the following first entry is freed from memory
         if (first == li->next)
         {
             // avoid first entry is original first, but first->next isn't

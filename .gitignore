@@ -47,3 +47,5 @@ Debug
 *.sdf
 *.suo
 *.v12.suo
+*.filters
+*.user
