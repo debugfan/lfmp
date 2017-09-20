@@ -6,8 +6,16 @@
 
 #include "memory_pool.h"
 #include <stdio.h>
-#include <Windows.h>
 #include <assert.h>
+#include <stdlib.h>
+#include "interlocked_defs.h"
+#include "event.h"
+
+#ifdef WIN32
+#include <Windows.h>
+#else
+#include <sys/sysinfo.h>
+#endif
 
 #define ENTRY_INITIAL_REFER_COUNT 1
 
@@ -65,6 +73,7 @@ mp_entry_t *mp_slist_pop(mp_slist_t *li)
                 {
                     if (0 == InterlockedCompareExchange(&first->owned, 1, 0))
                     {
+                        assert(first != li->next);
                         InterlockedIncrement(&first->ref_cnt);
                         done = 1;
                     }
@@ -164,7 +173,7 @@ void *mp_bucket_malloc(mp_bucket_t *bucket)
     return (void *)((unsigned char *)entry + sizeof(mp_entry_t));
 }
 
-void *mp_malloc(unsigned int size)
+void *mp_malloc(size_t size)
 {
     int idx = mp_lookup_bucket(size);
     return mp_bucket_malloc(&g_memory_pool.buckets[idx]);
@@ -173,7 +182,7 @@ void *mp_malloc(unsigned int size)
 void mp_bucket_free(mp_bucket_t *bucket, mp_entry_t *entry)
 {
     assert(entry->ref_cnt >= ENTRY_INITIAL_REFER_COUNT);
-    if (entry->size * bucket->entries > bucket->threshold)
+    if (entry->size * (bucket->entries + 1) > bucket->threshold)
     {
         if (entry->ref_cnt == ENTRY_INITIAL_REFER_COUNT)
         {
@@ -182,9 +191,22 @@ void mp_bucket_free(mp_bucket_t *bucket, mp_entry_t *entry)
         }
         else
         {
+#ifdef USE_FREE_THREAD
+            if (bucket->usable.ref_cnt == 0)
+            {
+                InterlockedDecrement(&bucket->entries);
+                free(entry);
+            }
+            else
+            {
+                mp_slist_push(&bucket->unusable, entry);
+                InterlockedExchange(&g_memory_pool.require_free, 1);
+            }
+#else
             while (bucket->usable.ref_cnt != 0); // safe for free
             InterlockedDecrement(&bucket->entries);
             free(entry);
+#endif
         }
     }
     else
@@ -218,19 +240,98 @@ void mp_free(void *p)
     mp_bucket_free(&g_memory_pool.buckets[idx], entry);
 }
 
-void mp_init(int max_usable, int flags)
+void *free_thread_proc(void *param)
 {
-    unsigned int threshold = max_usable / MEMORY_POOL_BUCKETS_NUMBER;;
-
-    for (int i = 0; i < MEMORY_POOL_BUCKETS_NUMBER; i++)
+    mp_entry_t *first;
+    mp_entry_t *next;
+    int i;
+    for (;;)
     {
-        mp_bucket_init(&g_memory_pool.buckets[i], 1 << i, threshold);
+        while (0 != g_memory_pool.require_free)
+        {
+            InterlockedExchange(&g_memory_pool.require_free, 0);
+
+            for (i = 0; i < MEMORY_POOL_BUCKETS_NUMBER; i++)
+            {
+                first = InterlockedExchangePointer(&g_memory_pool.buckets[i].unusable.next, NULL);
+                if (first != NULL)
+                {
+                    while (g_memory_pool.buckets[i].usable.ref_cnt != 0);
+                    while (first != NULL)
+                    {
+                        next = first->next;
+                        InterlockedDecrement(&g_memory_pool.buckets[i].entries);
+                        free(first);
+                        first = next;
+                    }
+                }
+            }
+        }
+
+        if (WAIT_TIMEOUT != wait_event(&g_memory_pool.termin_event, 1000))
+        {
+            break;
+        }
     }
+    printf("memory pool free thread exited.\n");
+    return 0;
+}
+
+#ifdef WIN32
+unsigned __int64 get_total_memroy()
+#else
+unsigned long get_total_memroy()
+#endif
+{
+#ifdef WIN32
+    MEMORYSTATUSEX statex;
+    statex.dwLength = sizeof(statex);
+    GlobalMemoryStatusEx(&statex);
+    return statex.ullTotalPhys;
+#else
+    struct sysinfo info;
+    sysinfo(&info);
+    return info.totalram;
+#endif
+}
+
+void mp_init(int usable_percents, int min_usable)
+{
+    int i;
+#ifdef WIN32
+    unsigned __int64 max_usable;
+    unsigned __int64 threshold;
+#else
+    unsigned long max_usable;
+    unsigned long threshold;
+#endif
+    max_usable = get_total_memroy() / 100 * usable_percents;
+    if (max_usable < min_usable)
+    {
+        max_usable = min_usable;
+    }
+    threshold = max_usable / MEMORY_POOL_BUCKETS_NUMBER;
+    if (threshold > 0x7fffffff)
+    {
+        threshold = 0x7fffffff;
+    }
+    for (i = 0; i < MEMORY_POOL_BUCKETS_NUMBER; i++)
+    {
+        mp_bucket_init(&g_memory_pool.buckets[i], 1 << i, (unsigned int)threshold);
+    }
+    g_memory_pool.require_free = 0;
+    init_event(&g_memory_pool.termin_event);
+
+    g_memory_pool.free_thread = create_thread(free_thread_proc, NULL);
 }
 
 void mp_clear()
 {
-    for (int i = 0; i < MEMORY_POOL_BUCKETS_NUMBER; i++)
+    int i;
+    set_event(&g_memory_pool.termin_event);
+    wait_thread(g_memory_pool.free_thread);
+    close_event(&g_memory_pool.termin_event);
+    for (i = 0; i < MEMORY_POOL_BUCKETS_NUMBER; i++)
     {
         mp_bucket_clear(&g_memory_pool.buckets[i]);
     }
@@ -238,10 +339,16 @@ void mp_clear()
 
 void mp_print()
 {
-    for (int i = 0; i < MEMORY_POOL_BUCKETS_NUMBER; i++)
+    int i;
+    printf("memory pool bucket entries:\n");
+    for (i = 0; i < MEMORY_POOL_BUCKETS_NUMBER; i++)
     {
-        printf("memory pool bucket[%d]: entries: %d\n", 
+        printf("[%2d] = %10d, ", 
             i,
             g_memory_pool.buckets[i].entries);
+        if ((i+1) % 4 == 0)
+        {
+            printf("\n");
+        }
     }
 }
