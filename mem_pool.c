@@ -4,12 +4,13 @@
 //  1: first malloc or in list or pop from list uniquely
 //  2: pop from list, and node is tried to access possibly by others
 
-#include "memory_pool.h"
+#include "mem_pool.h"
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
 #include "interlocked_defs.h"
 #include "event.h"
+#include "mem_utils.h"
 
 #ifdef WIN32
 #include <Windows.h>
@@ -17,7 +18,9 @@
 #include <sys/sysinfo.h>
 #endif
 
-#define ENTRY_INITIAL_REFER_COUNT 1
+#define MP_ENTRY_INITIAL_REFER_COUNT 1
+#define MP_ALIGN_SIZE (sizeof(void *)*4)
+#define MP_ENTRY_HEADER_SIZE ((sizeof(mp_entry_t) - 1)/MP_ALIGN_SIZE + 1)*MP_ALIGN_SIZE
 
 memory_pool_t g_memory_pool;
 
@@ -69,7 +72,7 @@ mp_entry_t *mp_slist_pop(mp_slist_t *li)
 
             if (done == 0)
             {
-                if (ENTRY_INITIAL_REFER_COUNT == InterlockedDecrement(&first->ref_cnt))
+                if (MP_ENTRY_INITIAL_REFER_COUNT == InterlockedDecrement(&first->ref_cnt))
                 {
                     if (0 == InterlockedCompareExchange(&first->owned, 1, 0))
                     {
@@ -127,7 +130,7 @@ int mp_slist_clear(mp_bucket_t *bucket, mp_slist_t *li)
     {
         next = first->next;
         InterlockedDecrement(&bucket->entries);
-        free(first);
+        memory_free(first);
         first = next;
     }
     return n;
@@ -142,6 +145,7 @@ void mp_bucket_init(mp_bucket_t *bucket,
     bucket->entries = 0;
     bucket->block_size = block_size;
     bucket->threshold = threshold;
+	bucket->next = NULL;
 }
 
 void mp_bucket_clear(mp_bucket_t *bucket)
@@ -150,44 +154,47 @@ void mp_bucket_clear(mp_bucket_t *bucket)
     mp_slist_clear(bucket, &bucket->unusable);
 }
 
-void *mp_bucket_malloc(mp_bucket_t *bucket)
+void *mp_bucket_malloc(mp_bucket_t *bucket, size_t size, unsigned long tag)
 {
     int block_size;
     mp_entry_t *entry;
+	if (bucket == NULL)
+	{
+		int idx = mp_lookup_bucket(size);
+		bucket = &g_memory_pool.buckets[idx];
+	}
     block_size = bucket->block_size;
+	if (size > (size_t)block_size)
+	{
+		return NULL;
+	}
     entry = mp_slist_pop(&bucket->usable);
     if (entry == NULL)
     {
-        entry = malloc(sizeof(mp_entry_t) + block_size);
+		entry = memory_alloc(MP_ENTRY_HEADER_SIZE + block_size, tag);
         if (entry == NULL)
         {
             return NULL;
         }
         ((mp_entry_t *)entry)->size = block_size;
-        ((mp_entry_t *)entry)->ref_cnt = ENTRY_INITIAL_REFER_COUNT;
+        ((mp_entry_t *)entry)->ref_cnt = MP_ENTRY_INITIAL_REFER_COUNT;
         ((mp_entry_t *)entry)->owned = 1;
 
         InterlockedIncrement(&bucket->entries);
     }
 
-    return (void *)((unsigned char *)entry + sizeof(mp_entry_t));
+	return (void *)((unsigned char *)entry + MP_ENTRY_HEADER_SIZE);
 }
 
-void *mp_malloc(size_t size)
+void mp_bucket_free_entry(mp_bucket_t *bucket, mp_entry_t *entry)
 {
-    int idx = mp_lookup_bucket(size);
-    return mp_bucket_malloc(&g_memory_pool.buckets[idx]);
-}
-
-void mp_bucket_free(mp_bucket_t *bucket, mp_entry_t *entry)
-{
-    assert(entry->ref_cnt >= ENTRY_INITIAL_REFER_COUNT);
+    assert(entry->ref_cnt >= MP_ENTRY_INITIAL_REFER_COUNT);
     if (entry->size * (bucket->entries + 1) > bucket->threshold)
     {
-        if (entry->ref_cnt == ENTRY_INITIAL_REFER_COUNT)
+        if (entry->ref_cnt == MP_ENTRY_INITIAL_REFER_COUNT)
         {
             InterlockedDecrement(&bucket->entries);
-            free(entry);
+			memory_free(entry);
         }
         else
         {
@@ -195,7 +202,7 @@ void mp_bucket_free(mp_bucket_t *bucket, mp_entry_t *entry)
             if (bucket->usable.ref_cnt == 0)
             {
                 InterlockedDecrement(&bucket->entries);
-                free(entry);
+                memory_free(entry);
             }
             else
             {
@@ -205,13 +212,13 @@ void mp_bucket_free(mp_bucket_t *bucket, mp_entry_t *entry)
 #else
             while (bucket->usable.ref_cnt != 0); // safe for free
             InterlockedDecrement(&bucket->entries);
-            free(entry);
+			memory_free(entry);
 #endif
         }
     }
     else
     {
-        if (entry->ref_cnt == ENTRY_INITIAL_REFER_COUNT)
+        if (entry->ref_cnt == MP_ENTRY_INITIAL_REFER_COUNT)
         {
             mp_slist_push(&bucket->usable, entry);
         }
@@ -219,7 +226,7 @@ void mp_bucket_free(mp_bucket_t *bucket, mp_entry_t *entry)
         {
             InterlockedExchange(&entry->owned, 0);
             InterlockedIncrement(&bucket->usable.ref_cnt);
-            if (ENTRY_INITIAL_REFER_COUNT == InterlockedDecrement(&entry->ref_cnt))
+            if (MP_ENTRY_INITIAL_REFER_COUNT == InterlockedDecrement(&entry->ref_cnt))
             {
                 if (InterlockedCompareExchange(&entry->owned, 1, 0) == 0)
                 {
@@ -231,13 +238,16 @@ void mp_bucket_free(mp_bucket_t *bucket, mp_entry_t *entry)
     }
 }
 
-void mp_free(void *p)
+void mp_bucket_free(mp_bucket_t *bucket, void *p)
 {
-    mp_entry_t *entry;
-    int idx;
-    entry = (mp_entry_t *)((unsigned char *)p - sizeof(mp_entry_t));
-    idx = mp_lookup_bucket(entry->size);
-    mp_bucket_free(&g_memory_pool.buckets[idx], entry);
+	mp_entry_t *entry;
+	entry = (mp_entry_t *)((unsigned char *)p - MP_ENTRY_HEADER_SIZE);
+	if (bucket == NULL)
+	{
+		int idx = mp_lookup_bucket(entry->size);
+		bucket = &g_memory_pool.buckets[idx];
+	}
+	mp_bucket_free_entry(bucket, entry);
 }
 
 void *free_thread_proc(void *param)
@@ -319,10 +329,38 @@ void mp_init(int usable_percents, int min_usable)
     {
         mp_bucket_init(&g_memory_pool.buckets[i], 1 << i, (unsigned int)threshold);
     }
+	g_memory_pool.next_register = NULL;
     g_memory_pool.require_free = 0;
     init_event(&g_memory_pool.termin_event);
 
     g_memory_pool.free_thread = create_thread(free_thread_proc, NULL);
+}
+
+void mp_register_bucket(mp_bucket_t *bucket, int block_size, unsigned int threshold)
+{
+	mp_bucket_init(bucket, block_size, threshold);
+	mp_bucket_t *first;
+	for (;;) {
+		first = g_memory_pool.next_register;
+		bucket->next = first;
+		if (first == InterlockedCompareExchangePointer(&g_memory_pool.next_register,
+			first,
+			bucket))
+		{
+			break;
+		}
+	}
+}
+
+void mp_clear_register_bucket()
+{
+	mp_bucket_t *bucket;
+	bucket = g_memory_pool.next_register;
+	while (bucket != NULL)
+	{
+		mp_bucket_clear(bucket);
+		bucket = bucket->next;
+	}
 }
 
 void mp_clear()
@@ -335,6 +373,8 @@ void mp_clear()
     {
         mp_bucket_clear(&g_memory_pool.buckets[i]);
     }
+	mp_clear_register_bucket();
+	check_memory();
 }
 
 void mp_print()

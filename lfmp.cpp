@@ -1,7 +1,7 @@
 // lfmp.cpp : Defines the entry point for the console application.
 //
 //#include "stdafx.h"
-#include "memory_pool.h"
+#include "mem_pool.h"
 #include "thread_defs.h"
 #include <stdlib.h>
 #include <stdio.h>

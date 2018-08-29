@@ -82,7 +82,8 @@
   <ItemGroup>
     <ClInclude Include="event.h" />
     <ClInclude Include="interlocked_defs.h" />
-    <ClInclude Include="memory_pool.h" />
+    <ClInclude Include="mem_pool.h" />
+    <ClInclude Include="mem_utils.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="targetver.h" />
     <ClInclude Include="thread_defs.h" />
@@ -90,7 +91,8 @@
   <ItemGroup>
     <ClCompile Include="event.c" />
     <ClCompile Include="lfmp.cpp" />
-    <ClCompile Include="memory_pool.c" />
+    <ClCompile Include="mem_pool.c" />
+    <ClCompile Include="mem_utils.c" />
     <ClCompile Include="stdafx.cpp" />
     <ClCompile Include="thread_defs.c" />
   </ItemGroup>
